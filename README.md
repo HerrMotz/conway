@@ -1,5 +1,7 @@
 # Conway's Game of Life Screensaver
 
+<img src="./preview.gif" width="500" />
+
 ## Building on Windows
 
 0. Clone this repo to your machine. We'll assume it is at `~/conway`
