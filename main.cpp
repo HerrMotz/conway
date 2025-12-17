@@ -3,6 +3,7 @@
 // Screen saver args (Windows):
 //   /s              run full screen (spans all monitors via virtual desktop window)
 //   /p <HWND>       preview inside the provided window handle
+//   /w [WxH]        windowed preview (not fullscreen)
 //   /c              config dialog (shows a simple message)
 //   (no args)       config dialog
 //
@@ -216,7 +217,7 @@ static SDL_Rect getVirtualDesktopBounds() {
 
 // ---------------- Windows screen saver argument handling ----------------
 
-enum class SaverMode { Config, Run, Preview };
+enum class SaverMode { Config, Run, Preview, WindowedPreview };
 
 static std::string lower(std::string s) {
     for (auto& ch : s) ch = (char)std::tolower((unsigned char)ch);
@@ -239,10 +240,36 @@ static uintptr_t parseHandle(const std::string& s) {
         return 0;
     }
 }
+static bool parseInt(const std::string& s, int& out) {
+    try {
+        size_t pos = 0;
+        long v = std::stol(s, &pos, 10);
+        if (pos == 0) return false;
+        // Keep it sane: avoid huge windows from accidental inputs.
+        if (v < 1 || v > 16384) return false;
+        out = (int)v;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static void parseWxH(const std::string& s, int& w, int& h) {
+    // Accepts "800x600"
+    auto x = s.find('x');
+    if (x == std::string::npos) return;
+    int tw = 0, th = 0;
+    if (parseInt(s.substr(0, x), tw) && parseInt(s.substr(x + 1), th)) {
+        w = tw;
+        h = th;
+    }
+}
 
 struct SaverArgs {
     SaverMode mode = SaverMode::Config;
     uintptr_t preview_parent_hwnd = 0;
+    int window_w = 1280;
+    int window_h = 720;
 };
 
 static SaverArgs parseSaverArgs(int argc, char** argv) {
@@ -262,6 +289,26 @@ static SaverArgs parseSaverArgs(int argc, char** argv) {
             out.preview_parent_hwnd = parseHandle(a1.substr(colon + 1));
         } else if (argc >= 3) {
             out.preview_parent_hwnd = parseHandle(argv[2]);
+        }
+        return out;
+    }
+
+    if (startsWith(a1, "w")) {
+        out.mode = SaverMode::WindowedPreview;
+
+        // Defaults can be overridden via:
+        //   /w:800x600
+        //   /w 800 600
+        out.window_w = 1280;
+        out.window_h = 720;
+
+        auto colon = a1.find(':');
+        if (colon != std::string::npos && colon + 1 < a1.size()) {
+            parseWxH(a1.substr(colon + 1), out.window_w, out.window_h);
+        } else if (argc >= 4) {
+            int w = 0, h = 0;
+            if (parseInt(argv[2], w)) out.window_w = w;
+            if (parseInt(argv[3], h)) out.window_h = h;
         }
         return out;
     }
@@ -327,7 +374,9 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const bool isPreview = (sargs.mode == SaverMode::Preview);
+    const bool isEmbeddedPreview = (sargs.mode == SaverMode::Preview);
+    const bool isWindowedPreview = (sargs.mode == SaverMode::WindowedPreview);
+    const bool isFullRun = (sargs.mode == SaverMode::Run);
 
     SDL_Window* window = nullptr;
     SDL_Rect virtualBounds = getVirtualDesktopBounds();
@@ -337,7 +386,7 @@ int main(int argc, char** argv) {
     HWND previewChild = nullptr;
 #endif
 
-    if (isPreview) {
+    if (isEmbeddedPreview) {
 #ifdef _WIN32
         if (!previewParent || !IsWindow(previewParent)) {
             SDL_Quit();
@@ -353,6 +402,13 @@ int main(int argc, char** argv) {
         SDL_Quit();
         return 0;
 #endif
+    } else if (isWindowedPreview) {
+        window = SDL_CreateWindow(
+            "Conway Screen Saver (SDL2) - Preview",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            sargs.window_w, sargs.window_h,
+            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        );
     } else {
         // One borderless window that spans the entire virtual desktop (all monitors).
         window = SDL_CreateWindow(
@@ -369,12 +425,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!isPreview) {
+    if (isFullRun) {
         // Make sure it stays above the taskbar / other windows.
 #ifdef _WIN32
         makeWindowTopmost(window, virtualBounds);
 #endif
-        SDL_ShowCursor(SDL_ENABLE); // keep usable for painting
+    }
+
+    if (isFullRun || isWindowedPreview) {
         SDL_RaiseWindow(window);
     }
 
@@ -436,7 +494,7 @@ int main(int argc, char** argv) {
         }
 
 #ifdef _WIN32
-        if (isPreview) {
+        if (isEmbeddedPreview) {
             if (!previewParent || !IsWindow(previewParent)) {
                 running = false;
             } else if (previewChild && IsWindow(previewChild)) {
