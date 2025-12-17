@@ -1,12 +1,12 @@
-// main.cpp — Conway (SDL2) as a Windows Screen Saver (.scr)
+// main.cpp — Conway (SDL2) as a Windows Screen Saver (.scr) spanning ALL monitors
 //
 // Screen saver args (Windows):
-//   /s              run full screen
+//   /s              run full screen (spans all monitors via virtual desktop window)
 //   /p <HWND>       preview inside the provided window handle
 //   /c              config dialog (shows a simple message)
-//   (no args)       config dialog (common when double-clicking)
+//   (no args)       config dialog
 //
-// Interaction (as requested):
+// Interaction:
 //   - LEFT mouse: paint/spawn live cells
 //   - RIGHT mouse: erase cells
 //   - ESC: exit (ONLY key that exits)
@@ -14,6 +14,8 @@
 // Build on Windows: compile as a GUI app (Subsystem: Windows), then rename output to .scr.
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -27,17 +29,10 @@
   #ifndef NOMINMAX
     #define NOMINMAX
   #endif
-  #define WIN32_LEAN_AND_MEAN
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
   #include <windows.h>
-#endif
-
-#ifdef _WIN32
-  #ifdef min
-    #undef min
-  #endif
-  #ifdef max
-    #undef max
-  #endif
 #endif
 
 struct Config {
@@ -51,6 +46,7 @@ struct Config {
 static int mod(int a, int m) { int r = a % m; return (r < 0) ? r + m : r; }
 static inline int idx(int x, int y, int w) { return y * w + x; }
 
+// --- Colour helpers (HSV -> RGB) ---
 static SDL_Color hsvToRgb(float h_deg, float s, float v) {
     h_deg = std::fmod(h_deg, 360.0f);
     if (h_deg < 0) h_deg += 360.0f;
@@ -129,7 +125,7 @@ static void stepLife(const std::vector<uint8_t>& cur, std::vector<uint8_t>& nxt,
             if (!nextAlive) {
                 nxt[i] = 0;
             } else {
-                if (!alive) nxt[i] = 1; // newborn
+                if (!alive) nxt[i] = 1;
                 else        nxt[i] = (age < cap) ? (uint8_t)(age + 1) : cap;
             }
         }
@@ -140,8 +136,6 @@ static void randomize(std::vector<uint8_t>& g, double density, std::mt19937& rng
     std::bernoulli_distribution d(std::clamp(density, 0.0, 1.0));
     for (auto& cell : g) cell = d(rng) ? 1 : 0;
 }
-
-static void clearGrid(std::vector<uint8_t>& g) { std::fill(g.begin(), g.end(), 0); }
 
 static void setCell(std::vector<uint8_t>& g, int w, int h, int gx, int gy, bool alive) {
     if (gx < 0 || gx >= w || gy < 0 || gy >= h) return;
@@ -180,6 +174,46 @@ static void resizeGridToWindow(SDL_Window* win, const Config& cfg,
     nxt.swap(new_nxt);
 }
 
+// ---- Virtual desktop bounds (span all monitors) ----
+static SDL_Rect getVirtualDesktopBoundsFallback() {
+    // Safe fallback if display queries fail
+    SDL_Rect r;
+    r.x = SDL_WINDOWPOS_UNDEFINED;
+    r.y = SDL_WINDOWPOS_UNDEFINED;
+    r.w = 1280;
+    r.h = 720;
+    return r;
+}
+
+static SDL_Rect getVirtualDesktopBounds() {
+    int n = SDL_GetNumVideoDisplays();
+    if (n <= 0) return getVirtualDesktopBoundsFallback();
+
+    SDL_Rect b{};
+    if (SDL_GetDisplayBounds(0, &b) != 0) return getVirtualDesktopBoundsFallback();
+
+    int minX = b.x;
+    int minY = b.y;
+    int maxX = b.x + b.w;
+    int maxY = b.y + b.h;
+
+    for (int i = 1; i < n; ++i) {
+        SDL_Rect bi{};
+        if (SDL_GetDisplayBounds(i, &bi) != 0) continue;
+        minX = std::min(minX, bi.x);
+        minY = std::min(minY, bi.y);
+        maxX = std::max(maxX, bi.x + bi.w);
+        maxY = std::max(maxY, bi.y + bi.h);
+    }
+
+    SDL_Rect r{};
+    r.x = minX;
+    r.y = minY;
+    r.w = std::max(1, maxX - minX);
+    r.h = std::max(1, maxY - minY);
+    return r;
+}
+
 // ---------------- Windows screen saver argument handling ----------------
 
 enum class SaverMode { Config, Run, Preview };
@@ -207,7 +241,7 @@ static uintptr_t parseHandle(const std::string& s) {
 }
 
 struct SaverArgs {
-    SaverMode mode = SaverMode::Config; // no-args default
+    SaverMode mode = SaverMode::Config;
     uintptr_t preview_parent_hwnd = 0;
 };
 
@@ -253,6 +287,18 @@ static HWND createPreviewChild(HWND parent) {
 }
 #endif
 
+#ifdef _WIN32
+static void makeWindowTopmost(SDL_Window* win, const SDL_Rect& r) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(win, &info)) {
+        HWND hwnd = info.info.win.window;
+        SetWindowPos(hwnd, HWND_TOPMOST, r.x, r.y, r.w, r.h,
+                     SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
     Config cfg;
     SaverArgs sargs = parseSaverArgs(argc, argv);
@@ -268,7 +314,7 @@ int main(int argc, char** argv) {
             "Conway Screen Saver",
             "This is a Conway (SDL2) screen saver.\n\n"
             "Run modes:\n"
-            "  /s  Fullscreen\n"
+            "  /s  Fullscreen across all monitors\n"
             "  /p <HWND> Preview\n"
             "  /c  Config (this dialog)\n\n"
             "Controls:\n"
@@ -284,6 +330,7 @@ int main(int argc, char** argv) {
     const bool isPreview = (sargs.mode == SaverMode::Preview);
 
     SDL_Window* window = nullptr;
+    SDL_Rect virtualBounds = getVirtualDesktopBounds();
 
 #ifdef _WIN32
     HWND previewParent = (HWND)sargs.preview_parent_hwnd;
@@ -307,11 +354,12 @@ int main(int argc, char** argv) {
         return 0;
 #endif
     } else {
+        // One borderless window that spans the entire virtual desktop (all monitors).
         window = SDL_CreateWindow(
             "Conway Screen Saver (SDL2)",
-            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            1280, 720,
-            SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP
+            virtualBounds.x, virtualBounds.y,
+            virtualBounds.w, virtualBounds.h,
+            SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS
         );
     }
 
@@ -321,16 +369,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!isPreview) {
+        // Make sure it stays above the taskbar / other windows.
+#ifdef _WIN32
+        makeWindowTopmost(window, virtualBounds);
+#endif
+        SDL_ShowCursor(SDL_ENABLE); // keep usable for painting
+        SDL_RaiseWindow(window);
+    }
+
     SDL_Renderer* ren = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!ren) {
         std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
         SDL_DestroyWindow(window);
         SDL_Quit();
         return 1;
-    }
-
-    if (!isPreview) {
-        SDL_ShowCursor(SDL_ENABLE); // keep it usable for painting
     }
 
     std::mt19937 rng((unsigned)std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -359,7 +412,6 @@ int main(int argc, char** argv) {
             }
 
             if (e.type == SDL_KEYDOWN) {
-                // As requested: ONLY ESC exits.
                 if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
             }
 
